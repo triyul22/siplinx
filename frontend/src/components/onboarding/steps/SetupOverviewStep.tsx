@@ -1,0 +1,105 @@
+import React, { useEffect, useState } from 'react';
+import { Info } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { OnboardingContainer } from '../OnboardingContainer';
+import { useOnboarding } from '@/contexts/OnboardingContext';
+import { useT } from '@/contexts/I18nContext';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+
+export function SetupOverviewStep() {
+  const { goNext } = useOnboarding();
+  const t = useT();
+  const [isMac, setIsMac] = useState(false);
+
+  useEffect(() => {
+    // Detect platform for totalSteps
+    const checkPlatform = async () => {
+      try {
+        const { platform } = await import('@tauri-apps/plugin-os');
+        setIsMac(platform() === 'macos');
+      } catch (e) {
+        setIsMac(navigator.userAgent.includes('Mac'));
+      }
+    };
+    checkPlatform();
+  }, []);
+
+  const steps = [
+    {
+      number: 1,
+      type: 'transcription',
+      title: t('onboarding.setup.step.transcription'),
+    },
+    {
+      number: 2,
+      type: 'summarization',
+      title: t('onboarding.setup.step.summarization'),
+    },
+  ];
+
+  const handleContinue = () => {
+    goNext();
+  };
+
+  return (
+    <OnboardingContainer
+      title={t('onboarding.setup.title')}
+      description={t('onboarding.setup.description')}
+      step={2}
+      totalSteps={isMac ? 4 : 3}
+    >
+      <div className="flex flex-col items-center space-y-10">
+        {/* Steps Card */}
+        <div className="w-full max-w-md bg-white rounded-lg border border-gray-200 p-4">
+          <div className="space-y-4">
+            {steps.map((step, idx) => {
+              return (
+                <div
+                  key={step.number}
+                  className={`flex items-start gap-4 p-1`}
+                >
+                  <div className="flex-1 ml-1">
+                    <h3 className="font-medium text-gray-900 flex items-center gap-2">
+                        {t('onboarding.setup.step', { number: step.number, title: step.title })}
+
+                        {step.type === "summarization" && (
+                            <TooltipProvider>
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                <button className="text-gray-400 hover:text-gray-600">
+                                    <Info className="w-4 h-4" />
+                                </button>
+                                </TooltipTrigger>
+                                <TooltipContent className="max-w-xs text-sm">
+                                {t('onboarding.setup.summarization.tooltip')}
+                                </TooltipContent>
+                            </Tooltip>
+                            </TooltipProvider>
+                        )}
+                        </h3>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+
+        {/* CTA Section */}
+        <div className="w-full max-w-xs space-y-4">
+          <Button
+            onClick={handleContinue}
+            className="w-full h-11 bg-gray-900 hover:bg-gray-800 text-white"
+          >
+            {t('onboarding.setup.cta')}
+          </Button>
+        </div>
+      </div>
+    </OnboardingContainer>
+  );
+}

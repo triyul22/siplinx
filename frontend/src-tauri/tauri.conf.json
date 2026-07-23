@@ -1,0 +1,166 @@
+{
+    "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+    "productName": "Siplinx AI",
+    "mainBinaryName": "siplinx-ai",
+    "version": "0.3.48",
+    "identifier": "com.siplinx.ai",
+    "build": {
+        "frontendDist": "../out",
+        "devUrl": "http://localhost:3118",
+        "beforeDevCommand": "pnpm dev",
+        "beforeBuildCommand": "pnpm build"
+    },
+    "app": {
+        "withGlobalTauri": true,
+        "windows": [
+            {
+                "title": "Siplinx AI",
+                "width": 1100,
+                "height": 700,
+                "resizable": true,
+                "fullscreen": false,
+                "visible": false,
+                "theme": "Light",
+                "decorations": true
+            },
+            {
+                "label": "pill",
+                "title": "Siplinx",
+                "url": "pill.html",
+                "width": 340,
+                "height": 92,
+                "minWidth": 200,
+                "minHeight": 60,
+                "resizable": false,
+                "visible": false,
+                "decorations": false,
+                "transparent": true,
+                "shadow": false,
+                "alwaysOnTop": true,
+                "skipTaskbar": true,
+                "focus": false,
+                "theme": "Light"
+            }
+        ],
+        "macOSPrivateApi": true,
+        "security": {
+            "csp": {
+                "default-src": "'self'",
+                "style-src": "'self' 'unsafe-inline'",
+                "img-src": "'self' asset: https://asset.localhost data:",
+                "connect-src": "'self' http://localhost:11434 http://localhost:5167 http://localhost:8178 https://api.ollama.ai http://localhost:3210 https://siplinx-ai.vercel.app"
+            },
+            "assetProtocol": {
+                "enable": true,
+                "scope": [
+                    "$APPDATA/**"
+                ]
+            },
+            "capabilities": [
+                {
+                    "identifier": "main",
+                    "description": "Main window capability with file system and media access",
+                    "windows": [
+                        "main",
+                        "pill"
+                    ],
+                    "permissions": [
+                        "core:window:allow-show",
+                        "core:window:allow-hide",
+                        "core:window:allow-set-focus",
+                        "core:window:allow-start-dragging",
+                        "core:window:allow-set-position",
+                        "core:window:allow-current-monitor",
+                        "core:window:allow-outer-size",
+                        "fs:default",
+                        "fs:allow-read-file",
+                        "fs:read-all",
+                        "fs:write-all",
+                        "fs:allow-app-read",
+                        "fs:allow-app-write",
+                        "fs:allow-download-write",
+                        "fs:allow-download-read",
+                        "fs:scope-download",
+                        "core:path:default",
+                        "core:event:default",
+                        "core:window:default",
+                        "core:app:default",
+                        "core:resources:default",
+                        "core:menu:default",
+                        "core:tray:default",
+                        "core:window:allow-set-title",
+                        "core:window:allow-set-always-on-top",
+                        "store:default",
+                        "notification:default",
+                        "notification:allow-is-permission-granted",
+                        "notification:allow-request-permission",
+                        "notification:allow-notify",
+                        "dialog:default",
+                        "deep-link:default",
+                        "updater:default",
+                        "process:default",
+                        "oauth:allow-start",
+                        "oauth:allow-cancel",
+                        "opener:default",
+                        {
+                            "identifier": "fs:scope",
+                            "allow": [
+                                {
+                                    "path": "$APPDATA/*"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    },
+    "bundle": {
+        "active": true,
+        "targets": [
+            "deb",
+            "appimage",
+            "msi",
+            "nsis",
+            "app",
+            "dmg"
+        ],
+        "createUpdaterArtifacts": true,
+        "icon": [
+            "icons/icon.png",
+            "icons/icon.icns",
+            "icons/icon.ico"
+        ],
+        "resources": [
+            "templates/*.json"
+        ],
+        "externalBin": [
+            "binaries/ffmpeg"
+        ],
+        "macOS": {
+            "entitlements": "entitlements.plist",
+            "hardenedRuntime": true
+        },
+        "windows": {
+            "signCommand": "powershell -ExecutionPolicy Bypass -File scripts/sign-windows.ps1 -FilePath %1",
+            "nsis": {
+                "installerHooks": "nsis/install-analytics.nsh"
+            }
+        }
+    },
+    "plugins": {
+        "deep-link": {
+            "desktop": {
+                "schemes": [
+                    "siplinx"
+                ]
+            }
+        },
+        "updater": {
+            "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk4RDJBQUZEMzNBMEEzMEUKUldRT282QXovYXJTbUNYa3BkT015d2lIRllvUllLNVR2ZFQvU3NpOE1MMGVIV0sxVWZZV3BSQisK",
+            "endpoints": [
+                "https://github.com/triyul22/siplinx/releases/latest/download/latest.json"
+            ]
+        }
+    }
+}

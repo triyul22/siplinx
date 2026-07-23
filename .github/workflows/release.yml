@@ -1,0 +1,394 @@
+name: "Release"
+
+on:
+  workflow_dispatch:
+
+# Prevent duplicate releases
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false  # Don't cancel releases, fail instead
+
+jobs:
+  # STEP 1: Create draft release first
+  create-release:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    outputs:
+      release-id: ${{ steps.create-release.outputs.result }}
+      version: ${{ steps.get-version.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all tags
+
+      - name: Get version from tauri.conf.json and check for existing tags
+        id: get-version
+        shell: bash
+        run: |
+          BASE_VERSION=$(grep -o '"version": "[^"]*"' frontend/src-tauri/tauri.conf.json | cut -d'"' -f4)
+          echo "Base version from tauri.conf.json: $BASE_VERSION"
+
+          # Fetch all tags
+          git fetch --tags
+
+          # Check if base version tag exists
+          if git tag -l "v${BASE_VERSION}" | grep -q .; then
+            echo "Tag v${BASE_VERSION} already exists, looking for minor updates..."
+
+            # Find all existing minor versions (e.g., 0.1.1.1, 0.1.1.2, etc.)
+            LATEST_MINOR=0
+            for i in $(seq 1 100); do
+              if git tag -l "v${BASE_VERSION}.${i}" | grep -q .; then
+                LATEST_MINOR=$i
+              else
+                break
+              fi
+            done
+
+            # Increment to next minor version
+            NEXT_MINOR=$((LATEST_MINOR + 1))
+
+            if [ $NEXT_MINOR -gt 100 ]; then
+              echo "ERROR: Maximum minor version (100) reached for ${BASE_VERSION}"
+              echo "Please update the version in tauri.conf.json"
+              exit 1
+            fi
+
+            VERSION="${BASE_VERSION}.${NEXT_MINOR}"
+            echo "Using minor update version: $VERSION"
+          else
+            VERSION="${BASE_VERSION}"
+            echo "Using base version: $VERSION"
+          fi
+
+          echo "Final version: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create Draft Release
+        id: create-release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: `v${{ steps.get-version.outputs.version }}`,
+              target_commitish: context.sha,
+              name: `Siplinx AI v${{ steps.get-version.outputs.version }}`,
+              draft: true,
+              prerelease: false,
+              generate_release_notes: true
+            })
+            console.log(`Created draft release with ID: ${data.id}`)
+            return data.id
+
+  # STEP 2: Build all platforms and upload directly to release
+  # Note: Linux builds are excluded from release (only macOS and Windows)
+  build-all-platforms:
+    needs: create-release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Форк siplinxai: Windows + macOS (Apple Silicon и Intel). Релизные сборки
+          # подписываются и notarize'ятся через Developer ID. fail-fast=false: провал одной не валит другие.
+          - platform: "windows-latest"
+            args: ""
+            target: "x86_64-pc-windows-msvc"
+          # macOS universal: один .dmg на Apple Silicon И Intel (для скачивания с сайта).
+          # Сайдкары (llama-helper, ffmpeg) собираются/склеиваются lipo под обе архитектуры.
+          # Пин на macos-14: на macos-latest GitHub укатил образ, где активный Xcode
+          # резолвится в несуществующий путь Xcode_16.4/clang/17 → линковка падает на
+          # `ld: library 'clang_rt.osx' not found`. macos-14 — стабильный известно-рабочий.
+          - platform: "macos-14"
+            args: "--target universal-apple-darwin"
+            target: "universal-apple-darwin"
+
+    uses: ./.github/workflows/build.yml
+    with:
+      platform: ${{ matrix.platform }}
+      target: ${{ matrix.target }}
+      build-args: ${{ matrix.args }}
+      sign-binaries: ${{ startsWith(matrix.platform, 'macos') }}
+      asset-prefix: "siplinxai"
+      upload-artifacts: false  # tauri-action uploads directly to release
+      release-id: ${{ needs.create-release.outputs.release-id }}
+      billing-mode: "trial"  # канонический билд: авто-триал 7 дней
+    secrets: inherit
+
+  # STEP 2b: Direct-вариант (сразу оплата $2/нед, без триала) для лендинга №2.
+  # ВАЖНО: собирается БЕЗ release-id — tauri-action НЕ грузит его в релиз и не
+  # трогает latest.json (апдейтер намеренно указывает только на trial-артефакты:
+  # решение о триале зафиксировано на сервере через user_source, поэтому
+  # direct-юзер после автообновления триал задним числом не получит).
+  # Установщики выкладывает отдельный job ниже с суффиксом "-direct" в имени.
+  build-direct:
+    needs: create-release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: "windows-latest"
+            args: ""
+            target: "x86_64-pc-windows-msvc"
+          - platform: "macos-14"
+            args: "--target universal-apple-darwin"
+            target: "universal-apple-darwin"
+    uses: ./.github/workflows/build.yml
+    with:
+      platform: ${{ matrix.platform }}
+      target: ${{ matrix.target }}
+      build-args: ${{ matrix.args }}
+      sign-binaries: ${{ startsWith(matrix.platform, 'macos') }}
+      asset-prefix: "siplinxai-direct"
+      upload-artifacts: true
+      billing-mode: "direct"
+    secrets: inherit
+
+  # STEP 2c: Переименовать direct-установщики (суффикс -direct) и добавить в релиз.
+  # Загружаем только установщики (.dmg, -setup.exe, .msi): updater-артефакты
+  # (.app.tar.gz, .sig) для direct не нужны — latest.json один, на trial.
+  upload-direct:
+    needs: [create-release, build-direct]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download direct build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: siplinxai-direct-*
+          path: direct-artifacts
+          merge-multiple: true
+
+      - name: Rename installers with -direct suffix and upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release-id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.create-release.outputs.version }}"
+          mkdir -p direct-renamed
+
+          # Установщики: .dmg (macOS), -setup.exe (NSIS) и .msi (Windows).
+          find direct-artifacts -type f \( -name "*.dmg" -o -name "*-setup.exe" -o -name "*.msi" \) | while read -r f; do
+            base="$(basename "$f")"
+            # "Siplinx.AI_0.3.26_x64-setup.exe" → "Siplinx.AI-direct_0.3.26_x64-setup.exe"
+            renamed="${base%%_*}-direct_${base#*_}"
+            cp "$f" "direct-renamed/$renamed"
+            echo "renamed: $base → $renamed"
+          done
+
+          ls -la direct-renamed
+          if [ -z "$(ls -A direct-renamed)" ]; then
+            echo "::error::No direct installers found in artifacts"
+            exit 1
+          fi
+
+          for f in direct-renamed/*; do
+            name="$(basename "$f")"
+            encoded_name="$(node -e 'console.log(encodeURIComponent(process.argv[1]))' "$name")"
+            echo "uploading direct asset to release ${RELEASE_ID}: $name"
+            gh api \
+              --method POST \
+              -H "Content-Type: application/octet-stream" \
+              "https://uploads.github.com/repos/${REPO}/releases/${RELEASE_ID}/assets?name=${encoded_name}" \
+              --input "$f"
+          done
+
+  # STEP 3: Build one updater manifest for all desktop platforms, publish, and summarize
+  release-summary:
+    needs: [create-release, build-all-platforms, upload-direct]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Generate consolidated updater manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.create-release.outputs.version }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release-id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          gh api "repos/${REPO}/releases/${RELEASE_ID}/assets" > assets.json
+
+          node <<'NODE'
+          const fs = require('fs');
+          const { execFileSync } = require('child_process');
+
+          const assets = JSON.parse(fs.readFileSync('assets.json', 'utf8'));
+          const version = process.env.VERSION;
+
+          function isDirect(name) {
+            return /(^|[-_])direct([-_]|$)/i.test(name);
+          }
+
+          function findAsset(predicate, description) {
+            const asset = assets.find((candidate) => {
+              return !candidate.name.endsWith('.sig')
+                && !candidate.name.endsWith('.json')
+                && !isDirect(candidate.name)
+                && predicate(candidate.name);
+            });
+
+            if (!asset) {
+              throw new Error(`Missing release asset for ${description}`);
+            }
+
+            const signatureAsset = assets.find((candidate) => candidate.name === `${asset.name}.sig`);
+            if (!signatureAsset) {
+              throw new Error(`Missing updater signature for ${asset.name}`);
+            }
+
+            const signature = execFileSync(
+              'gh',
+              ['api', signatureAsset.url, '-H', 'Accept: application/octet-stream'],
+              { encoding: 'utf8' }
+            ).trim();
+
+            if (!signature) {
+              throw new Error(`Empty updater signature for ${asset.name}`);
+            }
+
+            return {
+              signature,
+              // Стабильный tag-URL (v<version>), а НЕ asset.browser_download_url:
+              // пока релиз — draft, URL ассета имеет вид releases/download/untagged-<hash>/...
+              // и 404-ится после публикации (файлы переезжают на v<version>), из-за чего
+              // апдейтер не может скачать («Не удалось скачать или установить»).
+              url: `https://github.com/${process.env.REPO}/releases/download/v${version}/${asset.name}`,
+            };
+          }
+
+          const mac = findAsset((name) => /\.app\.tar\.gz$/i.test(name), 'macOS updater bundle');
+          const windows = findAsset(
+            (name) => /-setup\.exe$/i.test(name) || /\.msi$/i.test(name),
+            'Windows updater bundle'
+          );
+
+          const manifest = {
+            version,
+            notes: `Siplinx AI ${version}`,
+            pub_date: new Date().toISOString(),
+            platforms: {
+              'darwin-aarch64': mac,
+              'darwin-x86_64': mac,
+              'windows-x86_64': windows,
+            },
+          };
+
+          for (const [platform, config] of Object.entries(manifest.platforms)) {
+            if (!config.url || !config.signature) {
+              throw new Error(`Invalid updater manifest entry for ${platform}`);
+            }
+          }
+
+          fs.writeFileSync('latest.json', `${JSON.stringify(manifest, null, 2)}\n`);
+          console.log('Generated latest.json with platforms:', Object.keys(manifest.platforms).join(', '));
+          NODE
+
+          cat latest.json
+          existing_latest_id="$(node -e "const assets=require('./assets.json'); const latest=assets.find((a)=>a.name==='latest.json'); if (latest) console.log(latest.id);")"
+          if [ -n "$existing_latest_id" ]; then
+            echo "deleting previous latest.json asset: $existing_latest_id"
+            gh api --method DELETE "repos/${REPO}/releases/assets/${existing_latest_id}"
+          fi
+
+          encoded_name="$(node -e 'console.log(encodeURIComponent(process.argv[1]))' latest.json)"
+          gh api \
+            --method POST \
+            -H "Content-Type: application/json" \
+            "https://uploads.github.com/repos/${REPO}/releases/${RELEASE_ID}/assets?name=${encoded_name}" \
+            --input latest.json
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release-id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api --method PATCH "repos/${REPO}/releases/${RELEASE_ID}" -f draft=false
+          # GitHub не переносит указатель «latest» на новый релиз сам — ставим явно,
+          # иначе /releases/latest/download/latest.json продолжит отдавать прошлую версию.
+          gh api --method PATCH "repos/${REPO}/releases/${RELEASE_ID}" -f make_latest=true
+          echo "Release published and marked latest; /releases/latest/download/latest.json now serves this version."
+
+      - name: Get release assets and latest.json
+        id: release-info
+        run: |
+          VERSION="${{ needs.create-release.outputs.version }}"
+          RELEASE_ID="${{ needs.create-release.outputs.release-id }}"
+
+          echo "## Release Assets" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # List all release assets
+          echo "### Files in Release" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          gh api repos/${{ github.repository }}/releases/${RELEASE_ID}/assets --jq '.[] | "\(.name) (\(.size / 1048576 | floor)MB)"' >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Download and show latest.json
+          echo "### latest.json content" >> $GITHUB_STEP_SUMMARY
+          gh release download "v${VERSION}" --pattern "latest.json" --dir . 2>/dev/null || echo "latest.json not yet available"
+          if [ -f latest.json ]; then
+            echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
+            cat latest.json >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Download links
+          echo "### Download Links" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Release page:** https://github.com/${{ github.repository }}/releases/tag/v${VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Download all as ZIP:** https://github.com/${{ github.repository }}/archive/refs/tags/v${VERSION}.zip" >> $GITHUB_STEP_SUMMARY
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release Summary
+        run: |
+          echo "============================================"
+          echo "=== Release Created Successfully ==="
+          echo "============================================"
+          echo "Version: v${{ needs.create-release.outputs.version }}"
+          echo "Release URL: https://github.com/${{ github.repository }}/releases/tag/v${{ needs.create-release.outputs.version }}"
+          echo ""
+          echo "Uploaded assets (via tauri-action):"
+          echo "  - macOS: DMG installer + app.tar.gz (for updater) + .sig"
+          echo "  - Windows: MSI + NSIS installers + updater .sig files"
+          echo "  - Updater manifest: consolidated latest.json for darwin-aarch64, darwin-x86_64, windows-x86_64"
+          echo ""
+          echo "Release is published and available to the Tauri updater."
+          echo "============================================"
+
+          # Add to GitHub Step Summary
+          echo "## Release Created Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** v${{ needs.create-release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Release URL:** [View Release](https://github.com/${{ github.repository }}/releases/tag/v${{ needs.create-release.outputs.version }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Uploaded Assets" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Platform | Assets |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **macOS** | DMG installer, app.tar.gz (updater), .sig |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Windows** | MSI installer, NSIS installer, updater .sig files |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Updater** | consolidated latest.json for macOS Apple Silicon, macOS Intel and Windows x64 |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Updater" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The release is published, so \`https://github.com/${{ github.repository }}/releases/latest/download/latest.json\` is available for in-app updates." >> $GITHUB_STEP_SUMMARY

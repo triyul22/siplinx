@@ -1,0 +1,9 @@
+node_modules
+.next
+out
+.env
+.env.local
+*.log
+better-auth_migrations
+
+.vercel
